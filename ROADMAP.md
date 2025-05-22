@@ -1,11 +1,4 @@
-### Localized / Partition-of-Unity RBF
 
-Split large data into overlapping patches, fit local RBFs and blend them—boosts speed and limits blurring over large domains.
-
-### Low-Rank & Fast Methods
-
-- **Nyström** or **random Fourier features** for approximate kernels.  
-- **Fast multipole** or tree-based algorithms to accelerate evaluation on big datasets.
 
 ### Support for Custom Distance Metrics
 

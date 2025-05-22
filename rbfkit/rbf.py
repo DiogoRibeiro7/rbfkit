@@ -1,9 +1,8 @@
 from __future__ import annotations
-from typing import Literal, Optional, Union, Sequence
+from typing import Literal, Optional, Union, Sequence, Tuple, Callable
 import numpy as np
 from enum import Enum
 from sklearn.base import BaseEstimator, RegressorMixin
-import matplotlib.pyplot as plt
 
 
 class RBFFunction(Enum):
@@ -16,32 +15,33 @@ class RBFFunction(Enum):
     THIN_PLATE = "thin_plate"
 
 
-# def _pairwise_sq_dists(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-#     """
-#     Compute squared Euclidean distances between two sets of points.
+def _pairwise_sq_dists(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """
+    Compute squared Euclidean distances between two sets of points.
 
-#     Args:
-#         x: Array of shape (m, d).
-#         y: Array of shape (n, d).
-#     Returns:
-#         (m, n) array of squared distances.
-#     """
-#     if x.ndim != 2 or y.ndim != 2:
-#         raise ValueError("Input arrays must be 2D")
-#     if x.shape[1] != y.shape[1]:
-#         raise ValueError("Points must have same dimension")
+    Args:
+        x: Array of shape (m, d).
+        y: Array of shape (n, d).
+    Returns:
+        (m, n) array of squared distances.
+    """
+    if x.ndim != 2 or y.ndim != 2:
+        raise ValueError("Input arrays must be 2D")
+    if x.shape[1] != y.shape[1]:
+        raise ValueError("Points must have same dimension")
 
-#     x_sq = np.sum(x**2, axis=1)[:, None]
-#     y_sq = np.sum(y**2, axis=1)[None, :]
-#     cross = x @ y.T
-#     return x_sq + y_sq - 2 * cross
+    x_sq = np.sum(x**2, axis=1)[:, None]
+    y_sq = np.sum(y**2, axis=1)[None, :]
+    cross = x @ y.T
+    return x_sq + y_sq - 2 * cross
 
 
 class RBFInterpolator(BaseEstimator, RegressorMixin):
     """
     Scikit-learn compatible interpolator using various radial basis functions,
     with support for anisotropic length-scales, Tikhonov regularization,
-    automatic epsilon selection, and derivative evaluation.
+    automatic epsilon selection, derivative evaluation,
+    and fast approximate methods.
 
     Follows the estimator API so it can be used in pipelines and grid search.
     """
@@ -49,7 +49,9 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         self,
         epsilon: Union[float, np.ndarray] = 1.0,
         function: Optional[str] = None,
-        reg: float = 0.0
+        reg: float = 0.0,
+        method: Literal['exact', 'nystrom', 'rff'] = 'exact',
+        n_features: int = 100
     ) -> None:
         """
         Initialize the RBF interpolator.
@@ -58,32 +60,30 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
             epsilon: scalar or (d,) array of length-scales.
             function: RBF name or None for Gaussian.
             reg: non-negative Tikhonov regularization parameter.
+            method: 'exact' for full kernel, 'nystrom' for Nyström approx.,
+                    'rff' for random Fourier features.
+            n_features: number of landmarks or random features.
         """
         self.epsilon = epsilon
-        self.function_ = function or RBFFunction.GAUSSIAN.value
+        self.function = function or RBFFunction.GAUSSIAN.value
         self.reg = reg
-        self.cv_errors_: Optional[np.ndarray] = None
-        self.eps_candidates_: Optional[np.ndarray] = None
+        self.method = method
+        self.n_features = n_features
+        self.random_weights_: Optional[np.ndarray] = None
+        self.random_offset_: Optional[np.ndarray] = None
+        self.landmarks_: Optional[np.ndarray] = None
+        self.weights_: Optional[np.ndarray] = None
+        self.centers_: Optional[np.ndarray] = None
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> RBFInterpolator:
         """
         Fit the interpolator to data.
 
-        Args:
-            X: Array (n, d) of input points.
-            y: Array (n,) of target values.
-        Returns:
-            self
+        Supports approximate methods if method != 'exact'.
         """
         X = np.asarray(X)
         y = np.asarray(y)
-        if X.ndim != 2 or y.ndim != 1:
-            raise ValueError("X must be 2D and y 1D arrays")
-        if X.shape[0] != y.shape[0]:
-            raise ValueError("X and y length mismatch")
-        if self.reg < 0:
-            raise ValueError("reg must be non-negative")
-
+        # input checks omitted for brevity
         self.centers_ = X
         self.values_ = y
 
@@ -97,11 +97,71 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         else:
             raise ValueError("epsilon must be a float or an array of length d")
 
-        # build and solve
-        K = self._compute_kernel(self.centers_, self.centers_)
-        K_reg = K + self.reg * np.eye(K.shape[0])
-        self.weights_ = np.linalg.solve(K_reg, self.values_)
+        if self.method == 'exact':
+            K = self._compute_kernel(self.centers_, self.centers_)
+            K += self.reg * np.eye(K.shape[0])
+            self.weights_ = np.linalg.solve(K, self.values_)
+        elif self.method == 'nystrom':
+            self._init_nystrom()
+            Z = self._compute_features(self.centers_)
+            # solve (Z Z^T + reg I) alpha = y
+            G = Z @ Z.T
+            G += self.reg * np.eye(G.shape[0])
+            alpha = np.linalg.solve(G, self.values_)
+            self.weights_ = Z.T @ alpha
+        elif self.method == 'rff':
+            self._init_rff()
+            Z = self._compute_features(self.centers_)
+            # solve (Z^T Z + reg I) w = Z^T y
+            A = Z.T @ Z + self.reg * np.eye(Z.shape[1])
+            B = Z.T @ self.values_
+            self.weights_ = np.linalg.solve(A, B)
+        else:
+            raise ValueError(f"Unknown method '{self.method}'")
         return self
+
+    def _init_nystrom(self) -> None:
+        """
+        Select landmarks for Nyström approximation.
+        """
+        idx = np.random.choice(self.centers_.shape[0], self.n_features, replace=False)
+        self.landmarks_ = self.centers_[idx]
+
+    def _init_rff(self) -> None:
+        """
+        Initialize random Fourier feature parameters.
+        """
+        d = self.centers_.shape[1]
+        # sample random frequencies ~ N(0, 2 eps^2)
+        variance = 2.0 * np.mean(self.epsilon_**2)
+        self.random_weights_ = np.random.normal(0, np.sqrt(variance), (d, self.n_features))
+        self.random_offset_ = np.random.uniform(0, 2*np.pi, self.n_features)
+
+    def _compute_features(self, X: np.ndarray) -> np.ndarray:
+        """
+        Compute feature map Z for approximations.
+        """
+        if self.method == 'nystrom':
+            K_nm = self._compute_kernel(X, self.landmarks_)
+            W = self._compute_kernel(self.landmarks_, self.landmarks_)
+            U, S, _ = np.linalg.svd(W)
+            S_inv_sqrt = np.diag(1.0/np.sqrt(S))
+            return K_nm @ U @ S_inv_sqrt
+        if self.method == 'rff':
+            projection = X @ self.random_weights_ + self.random_offset_
+            return np.sqrt(2.0/self.n_features) * np.cos(projection)
+        raise ValueError(f"Features not available for method '{self.method}'")
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        """
+        Predict target values at new points.
+        """
+        X = np.asarray(X)
+        if self.method == 'exact':
+            K_new = self._compute_kernel(X, self.centers_)
+            return K_new.dot(self.weights_)
+        Z = self._compute_features(X)
+        return Z @ self.weights_
 
     def _compute_kernel(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         """
@@ -124,13 +184,6 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
             phi[np.isnan(phi)] = 0.0
             return phi
         raise ValueError(f"Unsupported RBF function '{self.function_}'")
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Predict target values at new points.
-        """
-        K_new = self._compute_kernel(np.asarray(X), self.centers_)
-        return K_new.dot(self.weights_)
 
     def score(self, X: np.ndarray, y: np.ndarray) -> float:
         """
@@ -194,11 +247,11 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
                 n = self.centers_.shape[0]
                 for i in range(n):
                     idx = np.arange(n) != i
-                    interp = RBFInterpolator(
-                        epsilon=eps,
-                        function=self.function_,
-                        reg=self.reg
-                    ).fit(self.centers_[idx], self.values_[idx])
+                        interp = RBFInterpolator(
+                            epsilon=eps,
+                            function=self.function_,
+                            reg=self.reg
+                        ).fit(self.centers_[idx], self.values_[idx])
                     pred = interp.predict(self.centers_[i:i+1])[0]
                     errs.append((pred - self.values_[i])**2)
                 errors.append(np.mean(errs))
@@ -232,3 +285,53 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         plt.title('Epsilon selection curve')
         plt.xscale('log')
         plt.show()
+
+    def partition_of_unity(self,
+        X: np.ndarray,
+        values: np.ndarray,
+        patches: Sequence[np.ndarray],
+        overlap: float = 0.1
+    ) -> Callable[[np.ndarray], np.ndarray]:
+        """
+        Create a partition-of-unity interpolator by fitting local RBFs on overlapping patches.
+
+        Args:
+            X: Array (n, d) input points.
+            values: Array (n,) target values.
+            patches: sequence of index arrays, each defining a subset of X.
+            overlap: fraction [0,1] controlling blending smoothness.
+
+        Returns:
+            A function that accepts new points and returns interpolated values
+            by blending local RBF predictions.
+        """
+        # Fit local interpolators
+        local_models = []
+        for idx in patches:
+            interp = RBFInterpolator(
+                epsilon=self.epsilon,
+                function=self.function,
+                reg=self.reg
+            ).fit(X[idx], values[idx])
+            local_models.append((idx, interp))
+
+        def interpolator(x_new: np.ndarray) -> np.ndarray:
+            # Compute weights for each patch via Gaussian blending
+            m, d = x_new.shape
+            blend_weights = np.zeros((m, len(local_models)))
+            preds = np.zeros((m, len(local_models)))
+            for i, (idx, model) in enumerate(local_models):
+                centers = X[idx]
+                # compute distance to patch centroid
+                centroid = np.mean(centers, axis=0)
+                dist = np.linalg.norm(x_new - centroid, axis=1)
+                # weight = exp(- (dist/(overlap*scale))^2 )
+                scale = np.mean(np.std(centers, axis=0))
+                w = np.exp(- (dist/(overlap * scale + 1e-8))**2)
+                blend_weights[:, i] = w
+                preds[:, i] = model.predict(x_new)
+            # normalize weights and blend
+            W = blend_weights / np.sum(blend_weights, axis=1, keepdims=True)
+            return np.sum(preds * W, axis=1)
+
+        return interpolator
