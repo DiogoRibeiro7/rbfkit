@@ -1,14 +1,14 @@
 from __future__ import annotations
-from typing import Optional, Union
+from typing import Literal, Optional, Union, Sequence
 import numpy as np
 from enum import Enum
+from sklearn.base import BaseEstimator, RegressorMixin
 
 
 class RBFFunction(Enum):
     """
     Supported radial basis functions.
     """
-
     GAUSSIAN = "gaussian"
     MULTIQUADRIC = "multiquadric"
     INVERSE_MULTIQ = "inverse_multiquadric"
@@ -36,138 +36,199 @@ def _pairwise_sq_dists(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     return x_sq + y_sq - 2 * cross
 
 
-class RBFInterpolator:
+class RBFInterpolator(BaseEstimator, RegressorMixin):
     """
-    Interpolator using various radial basis functions, with support for
-    anisotropic length-scales and Tikhonov regularization.
+    Scikit-learn compatible interpolator using various radial basis functions,
+    with support for anisotropic length-scales, Tikhonov regularization,
+    automatic epsilon selection, and derivative evaluation.
 
-    Attributes:
-        centers: training points (n, d).
-        weights: solution coefficients (n,).
-        epsilon: per-dimension or scalar length-scale(s).
-        function: type of RBF.
-        reg: regularization parameter.
+    Follows the estimator API so it can be used in pipelines and grid search.
     """
-
     def __init__(
         self,
-        centers: np.ndarray,
-        values: np.ndarray,
-        epsilon: Union[float, np.ndarray],
+        epsilon: Union[float, np.ndarray] = 1.0,
         function: Optional[str] = None,
-        reg: float = 0.0,
+        reg: float = 0.0
     ) -> None:
         """
-        Fit the RBF interpolator to data.
+        Initialize the RBF interpolator.
 
         Args:
-            centers: Array (n, d) of input points.
-            values: Array (n,) of target values.
             epsilon: scalar or (d,) array of length-scales.
             function: RBF name or None for Gaussian.
             reg: non-negative Tikhonov regularization parameter.
         """
-        # validate shapes
-        if centers.ndim != 2 or values.ndim != 1:
-            raise ValueError("centers must be 2D and values 1D arrays")
-        if centers.shape[0] != values.shape[0]:
-            raise ValueError("centers and values length mismatch")
-        if reg < 0:
-            raise ValueError("reg must be non-negative")
-
-        self.centers = centers
-        self.values = values
+        self.epsilon = epsilon
         self.function = function or RBFFunction.GAUSSIAN.value
         self.reg = reg
+        self.cv_errors_: Optional[np.ndarray] = None
+        self.eps_candidates_: Optional[np.ndarray] = None
 
-        # process epsilon into array of shape (d,)
-        eps_arr = np.atleast_1d(epsilon).astype(float)
-        d = centers.shape[1]
+    def fit(self, X: np.ndarray, y: np.ndarray) -> RBFInterpolator:
+        """
+        Fit the interpolator to data.
+
+        Args:
+            X: Array (n, d) of input points.
+            y: Array (n,) of target values.
+        Returns:
+            self
+        """
+        X = np.asarray(X)
+        y = np.asarray(y)
+        if X.ndim != 2 or y.ndim != 1:
+            raise ValueError("X must be 2D and y 1D arrays")
+        if X.shape[0] != y.shape[0]:
+            raise ValueError("X and y length mismatch")
+        if self.reg < 0:
+            raise ValueError("reg must be non-negative")
+
+        self.centers_ = X
+        self.values_ = y
+
+        # process epsilon
+        eps_arr = np.atleast_1d(self.epsilon).astype(float)
+        d = X.shape[1]
         if eps_arr.ndim == 1 and eps_arr.size == d:
-            self.epsilon = eps_arr
+            self.epsilon_ = eps_arr
         elif eps_arr.ndim == 0:
-            self.epsilon = np.full((d,), eps_arr.item())
+            self.epsilon_ = np.full((d,), eps_arr.item())
         else:
             raise ValueError("epsilon must be a float or an array of length d")
 
-        # build kernel matrix, add regularization, solve weights
-        K = self._compute_kernel(centers, centers)
+        # build and solve
+        K = self._compute_kernel(self.centers_, self.centers_)
         K_reg = K + self.reg * np.eye(K.shape[0])
-        self.weights = np.linalg.solve(K_reg, values)
+        self.weights_ = np.linalg.solve(K_reg, self.values_)
+        return self
 
     def _compute_kernel(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
         """
-        Compute the RBF kernel matrix between x and y, applying
-        anisotropic scaling and dispatching the chosen RBF function.
-
-        Args:
-            x: Array (m, d).
-            y: Array (n, d).
-        Returns:
-            Kernel matrix of shape (m, n).
+        Compute the RBF kernel matrix between x and y with anisotropic scaling.
         """
-        d = x.shape[1]
-        # pairwise difference scaled by epsilon
-        diff = x[:, None, :] - y[None, :, :]  # (m, n, d)
-        scaled = diff * self.epsilon[None, None, :]  # apply per-dim scale
-        d2 = np.sum(scaled**2, axis=2)  # (m, n)
+        diff = x[:, None, :] - y[None, :, :]
+        scaled = diff * self.epsilon_[None, None, :]
+        d2 = np.sum(scaled**2, axis=2)
 
-        # dispatch on RBF type
-        if self.function == RBFFunction.GAUSSIAN.value:
+        if self.function_ == RBFFunction.GAUSSIAN.value:
             return np.exp(-d2)
-        if self.function == RBFFunction.MULTIQUADRIC.value:
-            return np.sqrt(d2 + 1.0 / (np.prod(self.epsilon) ** 2))
-        if self.function == RBFFunction.INVERSE_MULTIQ.value:
-            return 1.0 / np.sqrt(d2 + 1.0 / (np.prod(self.epsilon) ** 2))
-        if self.function == RBFFunction.THIN_PLATE.value:
+        if self.function_ == RBFFunction.MULTIQUADRIC.value:
+            return np.sqrt(d2 + 1.0/(np.prod(self.epsilon_)**2))
+        if self.function_ == RBFFunction.INVERSE_MULTIQ.value:
+            return 1.0/np.sqrt(d2 + 1.0/(np.prod(self.epsilon_)**2))
+        if self.function_ == RBFFunction.THIN_PLATE.value:
             r = np.sqrt(d2)
-            with np.errstate(divide="ignore", invalid="ignore"):
+            with np.errstate(divide='ignore', invalid='ignore'):
                 phi = r**2 * np.log(r)
             phi[np.isnan(phi)] = 0.0
             return phi
-        raise ValueError(f"Unsupported RBF function '{self.function}'")
+        raise ValueError(f"Unsupported RBF function '{self.function_}'")
 
-    def __call__(self, x_new: np.ndarray) -> np.ndarray:
+    def predict(self, X: np.ndarray) -> np.ndarray:
         """
-        Predict at new input locations.
-
-        Args:
-            x_new: Array (m, d) points to predict.
-        Returns:
-            Array (m,) interpolated values.
+        Predict target values at new points.
         """
-        K_new = self._compute_kernel(x_new, self.centers)
-        return K_new.dot(self.weights)
+        K_new = self._compute_kernel(np.asarray(X), self.centers_)
+        return K_new.dot(self.weights_)
 
-    @staticmethod
+    def score(self, X: np.ndarray, y: np.ndarray) -> float:
+        """
+        Return the coefficient of determination R^2 of the prediction.
+        """
+        y_pred = self.predict(X)
+        u = ((y - y_pred)**2).sum()
+        v = ((y - np.mean(y))**2).sum()
+        return 1 - u/v
+
+    def gradient(self, X: np.ndarray) -> np.ndarray:
+        """
+        Compute the gradient at new points (Gaussian only).
+        """
+        if self.function_ != RBFFunction.GAUSSIAN.value:
+            raise NotImplementedError
+        diff = X[:, None, :] - self.centers_[None, :, :]
+        scaled = diff * self.epsilon_[None, None, :]
+        phi = np.exp(-np.sum(scaled**2, axis=2))
+        grad_basis = -2*(scaled*self.epsilon_[None, None, :])*phi[:,:,None]
+        return np.tensordot(grad_basis, self.weights_, axes=([1],[0]))
+
+    def hessian(self, X: np.ndarray) -> np.ndarray:
+        """
+        Compute the Hessian at new points (Gaussian only).
+        """
+        if self.function_ != RBFFunction.GAUSSIAN.value:
+            raise NotImplementedError
+        m, d = X.shape
+        diff = X[:, None, :] - self.centers_[None, :, :]
+        scaled = diff * self.epsilon_[None, None, :]
+        phi = np.exp(-np.sum(scaled**2, axis=2))
+        H = np.zeros((m,d,d))
+        for i in range(d):
+            for j in range(d):
+                term = 4*self.epsilon_[i]*self.epsilon_[j]*scaled[:,:,i]*scaled[:,:,j]
+                if i==j:
+                    term -= 2*(self.epsilon_[i]**2)
+                H[:,i,j] = np.tensordot(term*phi, self.weights_, axes=([1],[0]))
+        return H
+
     def select_epsilon(
-        centers: np.ndarray,
-        values: np.ndarray,
-        eps_candidates: np.ndarray,
-        function: Optional[str] = None,
+        self,
+        candidates: Sequence[float],
+        method: Literal['loo', 'grid'] = 'loo'
     ) -> float:
         """
-        Choose optimal epsilon via leave-one-out cross-validation.
+        Choose epsilon by cross-validation or grid evaluation.
 
         Args:
-            centers: (n, d) input points.
-            values: (n,) targets.
-            eps_candidates: 1D array of epsilons.
-            function: RBF name or None.
+            candidates: list or array of epsilon values to try.
+            method: 'loo' for leave-one-out, 'grid' for direct error scan.
         Returns:
-            epsilon with lowest CV error.
+            best epsilon value.
         """
-        n = centers.shape[0]
-        best_eps = eps_candidates[0]
-        best_err = np.inf
-        for eps in eps_candidates:
-            errors: list[float] = []
-            for i in range(n):
-                idx = np.arange(n) != i
-                interp = RBFInterpolator(centers[idx], values[idx], eps, function)
-                pred = interp(centers[i : i + 1])[0]
-                errors.append((pred - values[i]) ** 2)
-            mse = np.mean(errors)
-            if mse < best_err:
-                best_err, best_eps = float(mse), float(eps)
-        return best_eps
+        errors = []
+        for eps in candidates:
+            if method == 'loo':
+                # leave-one-out CV
+                errs = []
+                n = self.centers_.shape[0]
+                for i in range(n):
+                    idx = np.arange(n) != i
+                        interp = RBFInterpolator(
+                            epsilon=eps,
+                            function=self.function_,
+                            reg=self.reg
+                        ).fit(self.centers_[idx], self.values_[idx])
+                    pred = interp.predict(self.centers_[i:i+1])[0]
+                    errs.append((pred - self.values_[i])**2)
+                errors.append(np.mean(errs))
+            elif method == 'grid':
+                # fit once and compute training error
+                interp = RBFInterpolator(
+                    epsilon=eps,
+                    function=self.function_,
+                    reg=self.reg
+                ).fit(self.centers_, self.values_)
+                y_pred = interp.predict(self.centers_)
+                errors.append(np.mean((self.values_ - y_pred)**2))
+            else:
+                raise ValueError("Unknown method")
+        self.eps_candidates_ = np.array(candidates)
+        self.cv_errors_ = np.array(errors)
+        return candidates[int(np.argmin(errors))]
+
+    def plot_epsilon_curve(self) -> None:
+        """
+        Plot CV or grid errors vs epsilon candidates.
+
+        Requires matplotlib.
+        """
+        import matplotlib.pyplot as plt
+        if self.eps_candidates_ is None or self.cv_errors_ is None:
+            raise RuntimeError("No CV data. Run select_epsilon first.")
+        plt.figure()
+        plt.plot(self.eps_candidates_, self.cv_errors_, marker='o')
+        plt.xlabel('epsilon')
+        plt.ylabel('CV error')
+        plt.title('Epsilon selection curve')
+        plt.xscale('log')
+        plt.show()

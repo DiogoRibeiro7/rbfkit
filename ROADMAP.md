@@ -1,17 +1,3 @@
-
-
-### Jacobian / Gradient & Hessian
-
-Provide methods to compute ∇ₓ φ(x) and even ∇²ₓ φ(x) so users can get derivatives of the interpolant (useful in optimization or PDE collocation).
-
-### Scikit-Learn API Compatibility
-
-Subclass `BaseEstimator` and `RegressorMixin` so your interpolator works with `Pipeline`, `GridSearchCV`, etc.
-
-### Automatic ε Selection Helpers
-
-Beyond leave-one-out, add grid-search wrappers or L-curve heuristics, and plot tools to visualize CV error vs ε.
-
 ### Localized / Partition-of-Unity RBF
 
 Split large data into overlapping patches, fit local RBFs and blend them—boosts speed and limits blurring over large domains.
