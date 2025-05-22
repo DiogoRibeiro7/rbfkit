@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Literal, Optional, Union, Sequence, Tuple, Callable
 import numpy as np
 from enum import Enum
-import 
+import matplotlib.pyplot as plt
 from sklearn.base import BaseEstimator, RegressorMixin
 
 
@@ -77,18 +77,11 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         self.centers_: Optional[np.ndarray] = None
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> RBFInterpolator:
-        """
-        Fit the interpolator to data.
-
-        Supports approximate methods if method != 'exact'.
-        """
         X = np.asarray(X)
         y = np.asarray(y)
-        # input checks omitted for brevity
         self.centers_ = X
         self.values_ = y
 
-        # process epsilon
         eps_arr = np.atleast_1d(self.epsilon).astype(float)
         d = X.shape[1]
         if eps_arr.ndim == 1 and eps_arr.size == d:
@@ -105,15 +98,12 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         elif self.method == 'nystrom':
             self._init_nystrom()
             Z = self._compute_features(self.centers_)
-            # solve (Z Z^T + reg I) alpha = y
-            G = Z @ Z.T
-            G += self.reg * np.eye(G.shape[0])
+            G = Z @ Z.T + self.reg * np.eye(Z.shape[0])
             alpha = np.linalg.solve(G, self.values_)
             self.weights_ = Z.T @ alpha
         elif self.method == 'rff':
             self._init_rff()
             Z = self._compute_features(self.centers_)
-            # solve (Z^T Z + reg I) w = Z^T y
             A = Z.T @ Z + self.reg * np.eye(Z.shape[1])
             B = Z.T @ self.values_
             self.weights_ = np.linalg.solve(A, B)
@@ -122,26 +112,16 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         return self
 
     def _init_nystrom(self) -> None:
-        """
-        Select landmarks for Nyström approximation.
-        """
         idx = np.random.choice(self.centers_.shape[0], self.n_features, replace=False)
         self.landmarks_ = self.centers_[idx]
 
     def _init_rff(self) -> None:
-        """
-        Initialize random Fourier feature parameters.
-        """
         d = self.centers_.shape[1]
-        # sample random frequencies ~ N(0, 2 eps^2)
         variance = 2.0 * np.mean(self.epsilon_**2)
         self.random_weights_ = np.random.normal(0, np.sqrt(variance), (d, self.n_features))
         self.random_offset_ = np.random.uniform(0, 2*np.pi, self.n_features)
 
     def _compute_features(self, X: np.ndarray) -> np.ndarray:
-        """
-        Compute feature map Z for approximations.
-        """
         if self.method == 'nystrom':
             K_nm = self._compute_kernel(X, self.landmarks_)
             W = self._compute_kernel(self.landmarks_, self.landmarks_)
@@ -154,9 +134,6 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         raise ValueError(f"Features not available for method '{self.method}'")
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Predict target values at new points.
-        """
         X = np.asarray(X)
         if self.method == 'exact':
             K_new = self._compute_kernel(X, self.centers_)
@@ -165,9 +142,6 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         return Z @ self.weights_
 
     def _compute_kernel(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """
-        Compute the RBF kernel matrix between x and y with anisotropic scaling.
-        """
         diff = x[:, None, :] - y[None, :, :]
         scaled = diff * self.epsilon_[None, None, :]
         d2 = np.sum(scaled**2, axis=2)
@@ -187,18 +161,12 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         raise ValueError(f"Unsupported RBF function '{self.function_}'")
 
     def score(self, X: np.ndarray, y: np.ndarray) -> float:
-        """
-        Return the coefficient of determination R^2 of the prediction.
-        """
         y_pred = self.predict(X)
         u = ((y - y_pred)**2).sum()
         v = ((y - np.mean(y))**2).sum()
         return 1 - u/v
 
     def gradient(self, X: np.ndarray) -> np.ndarray:
-        """
-        Compute the gradient at new points (Gaussian only).
-        """
         if self.function_ != RBFFunction.GAUSSIAN.value:
             raise NotImplementedError
         diff = X[:, None, :] - self.centers_[None, :, :]
@@ -208,9 +176,6 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         return np.tensordot(grad_basis, self.weights_, axes=([1],[0]))
 
     def hessian(self, X: np.ndarray) -> np.ndarray:
-        """
-        Compute the Hessian at new points (Gaussian only).
-        """
         if self.function_ != RBFFunction.GAUSSIAN.value:
             raise NotImplementedError
         m, d = X.shape
@@ -231,19 +196,9 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         candidates: Sequence[float],
         method: Literal['loo', 'grid'] = 'loo'
     ) -> float:
-        """
-        Choose epsilon by cross-validation or grid evaluation.
-
-        Args:
-            candidates: list or array of epsilon values to try.
-            method: 'loo' for leave-one-out, 'grid' for direct error scan.
-        Returns:
-            best epsilon value.
-        """
         errors = []
         for eps in candidates:
             if method == 'loo':
-                # leave-one-out CV
                 errs = []
                 n = self.centers_.shape[0]
                 for i in range(n):
@@ -257,7 +212,6 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
                     errs.append((pred - self.values_[i])**2)
                 errors.append(np.mean(errs))
             elif method == 'grid':
-                # fit once and compute training error
                 interp = RBFInterpolator(
                     epsilon=eps,
                     function=self.function_,
@@ -272,12 +226,7 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
         return candidates[int(np.argmin(errors))]
 
     def plot_epsilon_curve(self) -> None:
-        """
-        Plot CV or grid errors vs epsilon candidates.
-
-        Requires matplotlib.
-        """
-        if self.eps_candidates_ is None or self.cv_errors_ is None:
+        if not hasattr(self, 'eps_candidates_') or not hasattr(self, 'cv_errors_'):
             raise RuntimeError("No CV data. Run select_epsilon first.")
         plt.figure()
         plt.plot(self.eps_candidates_, self.cv_errors_, marker='o')
@@ -295,44 +244,30 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
     ) -> Callable[[np.ndarray], np.ndarray]:
         """
         Create a partition-of-unity interpolator by fitting local RBFs on overlapping patches.
-
-        Args:
-            X: Array (n, d) input points.
-            values: Array (n,) target values.
-            patches: sequence of index arrays, each defining a subset of X.
-            overlap: fraction [0,1] controlling blending smoothness.
-
-        Returns:
-            A function that accepts new points and returns interpolated values
-            by blending local RBF predictions.
         """
-        # Fit local interpolators
-        local_models = []
+        local_models: list[Tuple[np.ndarray, RBFInterpolator]] = []
         for idx in patches:
             interp = RBFInterpolator(
                 epsilon=self.epsilon,
-                function=self.function,
+                function=self.function_,
                 reg=self.reg
             ).fit(X[idx], values[idx])
             local_models.append((idx, interp))
 
         def interpolator(x_new: np.ndarray) -> np.ndarray:
-            # Compute weights for each patch via Gaussian blending
             m, d = x_new.shape
             blend_weights = np.zeros((m, len(local_models)))
             preds = np.zeros((m, len(local_models)))
             for i, (idx, model) in enumerate(local_models):
                 centers = X[idx]
-                # compute distance to patch centroid
                 centroid = np.mean(centers, axis=0)
                 dist = np.linalg.norm(x_new - centroid, axis=1)
-                # weight = exp(- (dist/(overlap*scale))^2 )
                 scale = np.mean(np.std(centers, axis=0))
                 w = np.exp(- (dist/(overlap * scale + 1e-8))**2)
                 blend_weights[:, i] = w
                 preds[:, i] = model.predict(x_new)
-            # normalize weights and blend
             W = blend_weights / np.sum(blend_weights, axis=1, keepdims=True)
             return np.sum(preds * W, axis=1)
 
         return interpolator
+
