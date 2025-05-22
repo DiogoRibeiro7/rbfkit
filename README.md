@@ -10,6 +10,7 @@ rbfkit/
 ├── rbfkit/
 │   ├── __init__.py
 │   └── rbf.py
+│   └── anisotropic.py
 └── tests/
     └── test_rbf.py
 ```

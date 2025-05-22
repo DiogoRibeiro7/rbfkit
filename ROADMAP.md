@@ -1,14 +1,4 @@
-### Anisotropic / Scaled RBFs
 
-Allow each input dimension to have its own length-scale εₖ. This can capture directional differences in data.
-
-### Regularization & Tikhonov Penalty
-
-Solve  
-\[
-(\Phi + \lambda I)\,w = y
-\]  
-to stabilize ill-conditioned kernels when ε is small or noisy.
 
 ### Jacobian / Gradient & Hessian
 
