@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Literal, Optional, Union, Sequence, Tuple, Callable
 import numpy as np
 from enum import Enum
+import 
 from sklearn.base import BaseEstimator, RegressorMixin
 
 
@@ -65,7 +66,7 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
             n_features: number of landmarks or random features.
         """
         self.epsilon = epsilon
-        self.function = function or RBFFunction.GAUSSIAN.value
+        self.function_ = function or RBFFunction.GAUSSIAN.value
         self.reg = reg
         self.method = method
         self.n_features = n_features
@@ -247,11 +248,11 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
                 n = self.centers_.shape[0]
                 for i in range(n):
                     idx = np.arange(n) != i
-                        interp = RBFInterpolator(
-                            epsilon=eps,
-                            function=self.function_,
-                            reg=self.reg
-                        ).fit(self.centers_[idx], self.values_[idx])
+                    interp = RBFInterpolator(
+                        epsilon=eps,
+                        function=self.function_,
+                        reg=self.reg
+                    ).fit(self.centers_[idx], self.values_[idx])
                     pred = interp.predict(self.centers_[i:i+1])[0]
                     errs.append((pred - self.values_[i])**2)
                 errors.append(np.mean(errs))
