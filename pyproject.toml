@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "rbfkit"
+version = "0.1.0"
+description = "A lightweight, extensible toolkit for radial basis function interpolation and kernel-based modeling."
+authors = ["Diogo Ribeiro <diogo.debastos.ribeiro@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/DiogoRibeiro7/rbfkit"
+repository = "https://github.com/DiogoRibeiro7/rbfkit"
+keywords = ["rbf", "interpolation", "kernel", "radial-basis"]
+
+[tool.poetry.dependencies]
+python = "^3.9"
+numpy = "^1.18"
+
+[tool.poetry.dev-dependencies]
+pytest = "^7.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
