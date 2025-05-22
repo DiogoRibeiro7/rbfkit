@@ -13,7 +13,6 @@ keywords = ["rbf", "interpolation", "kernel", "radial-basis"]
 python = "^3.9"
 numpy = "^1.18"
 scikit-learn = "^1.6.1"
-invoke = "^2.2.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.5"
