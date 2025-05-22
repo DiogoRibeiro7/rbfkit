@@ -3,6 +3,7 @@ from typing import Literal, Optional, Union, Sequence
 import numpy as np
 from enum import Enum
 from sklearn.base import BaseEstimator, RegressorMixin
+import matplotlib.pyplot as plt
 
 
 class RBFFunction(Enum):
@@ -15,25 +16,25 @@ class RBFFunction(Enum):
     THIN_PLATE = "thin_plate"
 
 
-def _pairwise_sq_dists(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """
-    Compute squared Euclidean distances between two sets of points.
+# def _pairwise_sq_dists(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+#     """
+#     Compute squared Euclidean distances between two sets of points.
 
-    Args:
-        x: Array of shape (m, d).
-        y: Array of shape (n, d).
-    Returns:
-        (m, n) array of squared distances.
-    """
-    if x.ndim != 2 or y.ndim != 2:
-        raise ValueError("Input arrays must be 2D")
-    if x.shape[1] != y.shape[1]:
-        raise ValueError("Points must have same dimension")
+#     Args:
+#         x: Array of shape (m, d).
+#         y: Array of shape (n, d).
+#     Returns:
+#         (m, n) array of squared distances.
+#     """
+#     if x.ndim != 2 or y.ndim != 2:
+#         raise ValueError("Input arrays must be 2D")
+#     if x.shape[1] != y.shape[1]:
+#         raise ValueError("Points must have same dimension")
 
-    x_sq = np.sum(x**2, axis=1)[:, None]
-    y_sq = np.sum(y**2, axis=1)[None, :]
-    cross = x @ y.T
-    return x_sq + y_sq - 2 * cross
+#     x_sq = np.sum(x**2, axis=1)[:, None]
+#     y_sq = np.sum(y**2, axis=1)[None, :]
+#     cross = x @ y.T
+#     return x_sq + y_sq - 2 * cross
 
 
 class RBFInterpolator(BaseEstimator, RegressorMixin):
@@ -59,7 +60,7 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
             reg: non-negative Tikhonov regularization parameter.
         """
         self.epsilon = epsilon
-        self.function = function or RBFFunction.GAUSSIAN.value
+        self.function_ = function or RBFFunction.GAUSSIAN.value
         self.reg = reg
         self.cv_errors_: Optional[np.ndarray] = None
         self.eps_candidates_: Optional[np.ndarray] = None
@@ -193,11 +194,11 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
                 n = self.centers_.shape[0]
                 for i in range(n):
                     idx = np.arange(n) != i
-                        interp = RBFInterpolator(
-                            epsilon=eps,
-                            function=self.function_,
-                            reg=self.reg
-                        ).fit(self.centers_[idx], self.values_[idx])
+                    interp = RBFInterpolator(
+                        epsilon=eps,
+                        function=self.function_,
+                        reg=self.reg
+                    ).fit(self.centers_[idx], self.values_[idx])
                     pred = interp.predict(self.centers_[i:i+1])[0]
                     errs.append((pred - self.values_[i])**2)
                 errors.append(np.mean(errs))
@@ -222,7 +223,6 @@ class RBFInterpolator(BaseEstimator, RegressorMixin):
 
         Requires matplotlib.
         """
-        import matplotlib.pyplot as plt
         if self.eps_candidates_ is None or self.cv_errors_ is None:
             raise RuntimeError("No CV data. Run select_epsilon first.")
         plt.figure()
